@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
@@ -23,12 +24,22 @@ namespace WearableTorches
 
         private void Update()
         {
-            var player = Player.m_localPlayer;
-            if (player == null || ZInput.instance == null)
+            if (ZInput.instance == null)
                 return;
 
-            if (ZInput.GetKeyDown(KeyCode.G))
-                WearableTorchManager.OnBackTorchKeyPressed(player);
+            // local input
+            var localPlayer = Player.m_localPlayer;
+            if (localPlayer != null && ZInput.GetKeyDown(KeyCode.G))
+            {
+                WearableTorchManager.OnBackTorchKeyPressed(localPlayer);
+            }
+
+            // sync all players
+            var allPlayers = Player.GetAllPlayers();
+            foreach (var p in allPlayers)
+            {
+                WearableTorchManager.SyncBackTorchForPlayer(p);
+            }
         }
 
         private void OnDestroy()
@@ -39,30 +50,87 @@ namespace WearableTorches
 
     public static class WearableTorchManager
     {
-        private static GameObject _backTorchObject;
+        private static readonly Dictionary<Player, GameObject> BackTorches = new Dictionary<Player, GameObject>();
+
+        private const string ZdoKeyBackTorch = "WearableTorches_BackTorch";
 
         private static readonly Vector3 FlameOffset = new Vector3(0f, 0f, 0.61f);
         private static readonly Vector3 LightOffset = new Vector3(0f, 0f, 0.61f);
 
         private static readonly Quaternion BackRotationOffset = Quaternion.Euler(-80f, 0f, 0f);
 
-        // Toggle G
+        // Toggle G (owner)
         public static void OnBackTorchKeyPressed(Player player)
         {
-            if (_backTorchObject != null)
-            {
-                DestroyBackTorch();
+            var nview = GetNView(player);
+            if (nview == null)
                 return;
-            }
 
-            var torchItem = GetTorchInHands(player);
-            if (torchItem == null)
-            {
-                WearableTorchesPlugin.Log.LogInfo("No torch in hands");
+            if (!nview.IsOwner())
                 return;
-            }
 
-            EquipBackTorchFromItem(player, torchItem);
+            var zdo = nview.GetZDO();
+            if (zdo == null)
+                return;
+
+            bool current = zdo.GetBool(ZdoKeyBackTorch, false);
+            bool next = !current;
+            zdo.Set(ZdoKeyBackTorch, next);
+
+            WearableTorchesPlugin.Log.LogInfo($"Back torch state for {player.GetPlayerName()} = {next}");
+        }
+
+        // Sync per player
+        public static void SyncBackTorchForPlayer(Player player)
+        {
+            var nview = GetNView(player);
+            if (nview == null)
+                return;
+
+            var zdo = nview.GetZDO();
+            if (zdo == null)
+                return;
+
+            bool hasBackTorch = zdo.GetBool(ZdoKeyBackTorch, false);
+
+            BackTorches.TryGetValue(player, out var existing);
+
+            if (hasBackTorch)
+            {
+                if (existing == null)
+                {
+                    // need visual
+                    var torchItem = GetTorchInHands(player);
+                    if (torchItem == null)
+                    {
+                        // no more torch equipped → clear flag if owner
+                        if (nview.IsOwner())
+                            zdo.Set(ZdoKeyBackTorch, false);
+                        return;
+                    }
+
+                    var go = CreateBackTorchVisual(player, torchItem);
+                    if (go != null)
+                        BackTorches[player] = go;
+                }
+            }
+            else
+            {
+                if (existing != null)
+                {
+                    UnityEngine.Object.Destroy(existing);
+                    BackTorches.Remove(player);
+                }
+            }
+        }
+
+        // helper: get ZNetView from Player
+        private static ZNetView GetNView(Player player)
+        {
+            if (player == null)
+                return null;
+
+            return player.GetComponent<ZNetView>();
         }
 
         // Reflection: Get hand items
@@ -96,55 +164,52 @@ namespace WearableTorches
             return (item.m_shared?.m_name ?? "").ToLower().Contains("torch");
         }
 
-        // Equip torch on back
-        private static void EquipBackTorchFromItem(Player player, ItemDrop.ItemData item)
+        // Create visual torch on back (no network, no loot)
+        private static GameObject CreateBackTorchVisual(Player player, ItemDrop.ItemData item)
         {
             var prefab = item.m_dropPrefab;
             if (prefab == null)
             {
                 WearableTorchesPlugin.Log.LogWarning("Prefab is null");
-                return;
+                return null;
             }
 
             var attach = FindBackAttach(player);
 
-            DestroyBackTorch();
+            var backTorch = new GameObject("BackTorchObject");
+            backTorch.transform.SetParent(attach, false);
 
-            // ***** FIX: we do NOT instantiate the prefab *****
-            _backTorchObject = new GameObject("BackTorchObject");
-            _backTorchObject.transform.SetParent(attach, false);
+            backTorch.transform.localRotation = BackRotationOffset;
+            backTorch.transform.localPosition = new Vector3(-0.0026f, -0.002f, -0.0017f);
 
-            _backTorchObject.transform.localRotation = BackRotationOffset;
-            _backTorchObject.transform.localPosition = new Vector3(-0.0024f, -0.002f, -0.0017f);
-
-            // Fix scaling
+            // fix scaling
             Vector3 ps = attach.lossyScale;
-            _backTorchObject.transform.localScale = new Vector3(
+            backTorch.transform.localScale = new Vector3(
                 ps.x != 0 ? 1f / ps.x : 1f,
                 ps.y != 0 ? 1f / ps.y : 1f,
                 ps.z != 0 ? 1f / ps.z : 1f
             );
 
-            // Copy mesh from prefab → but never instantiate ItemDrop
+            // mesh copy
             foreach (var renderer in prefab.GetComponentsInChildren<MeshRenderer>(true))
             {
-                var clone = UnityEngine.Object.Instantiate(renderer.gameObject, _backTorchObject.transform, false);
-                clone.name = "BackTorchMesh";
+                var cloneMesh = UnityEngine.Object.Instantiate(renderer.gameObject, backTorch.transform, false);
+                cloneMesh.name = "BackTorchMesh";
             }
 
-            // Flames
+            // flames
             var fx = FindTorchFlamesObject(player);
             if (fx != null)
             {
-                var clone = UnityEngine.Object.Instantiate(fx, _backTorchObject.transform, false);
-                clone.name = "BackTorchFlames";
-                clone.transform.localRotation = Quaternion.identity;
-                clone.transform.localPosition = FlameOffset;
+                var cloneFx = UnityEngine.Object.Instantiate(fx, backTorch.transform, false);
+                cloneFx.name = "BackTorchFlames";
+                cloneFx.transform.localRotation = Quaternion.identity;
+                cloneFx.transform.localPosition = FlameOffset;
             }
 
-            // Light
+            // light
             var lightGO = new GameObject("BackTorchLight");
-            lightGO.transform.SetParent(_backTorchObject.transform, false);
+            lightGO.transform.SetParent(backTorch.transform, false);
             lightGO.transform.localRotation = Quaternion.identity;
             lightGO.transform.localPosition = LightOffset;
 
@@ -154,6 +219,8 @@ namespace WearableTorches
             light.range = 15f;
             light.intensity = 1.9f;
             light.shadows = LightShadows.Soft;
+
+            return backTorch;
         }
 
         // Locate back bone
@@ -194,14 +261,15 @@ namespace WearableTorches
             return null;
         }
 
-        // Destroy
+        // Destroy all visuals
         private static void DestroyBackTorch()
         {
-            if (_backTorchObject == null)
-                return;
-
-            UnityEngine.Object.Destroy(_backTorchObject);
-            _backTorchObject = null;
+            foreach (var kvp in BackTorches)
+            {
+                if (kvp.Value != null)
+                    UnityEngine.Object.Destroy(kvp.Value);
+            }
+            BackTorches.Clear();
         }
 
         public static void ForceDestroyBackTorch() => DestroyBackTorch();
