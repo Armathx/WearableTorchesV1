@@ -17,89 +17,66 @@ namespace WearableTorches
         {
             Log = Logger;
             _harmony = new Harmony("com.thomas.wearabletorches");
-            _harmony.PatchAll(); // pour plus tard si tu veux d’autres patchs
-            Log.LogInfo("Wearable Torches loaded (Awake)");
+            _harmony.PatchAll();
+            Log.LogInfo("Wearable Torches loaded");
         }
 
         private void Update()
         {
             var player = Player.m_localPlayer;
-            if (player == null)
+            if (player == null || ZInput.instance == null)
                 return;
 
-            // Utilisation de ZInput (Valheim) pour la touche G
-            if (ZInput.instance != null && ZInput.GetKeyDown(KeyCode.G))
-            {
-                Log.LogInfo("Touche G pressée, gestion de la torche dans le dos.");
+            if (ZInput.GetKeyDown(KeyCode.G))
                 WearableTorchManager.OnBackTorchKeyPressed(player);
-            }
+        }
+
+        private void OnDestroy()
+        {
+            WearableTorchManager.ForceDestroyBackTorch();
         }
     }
 
-    // --------------------------------------------------------
-    // Gestion de la torche dans le dos
-    // --------------------------------------------------------
     public static class WearableTorchManager
     {
-        private static GameObject _backTorchObject; // parent : mesh + FX + light
+        private static GameObject _backTorchObject;
 
-        // Offsets en ESPACE LOCAL DE LA TORCHE DANS LE DOS
-        // (tu peux ajuster ces valeurs facilement)
-        private static readonly Vector3 FlameOffset = new Vector3(0f, 0.32f, 0.0f);
-        private static readonly Vector3 LightOffset = new Vector3(0f, 0.32f, 0.0f);
+        private static readonly Vector3 FlameOffset = new Vector3(0f, 0f, 0.61f);
+        private static readonly Vector3 LightOffset = new Vector3(0f, 0f, 0.61f);
 
-        // Rotation additionnelle appliquée à la rotation de la torche en main
-        // pour l'adapter à la position dans le dos.
-        private static readonly Quaternion BackRotationOffset = Quaternion.Euler(-30f, 30f, 0f);
+        private static readonly Quaternion BackRotationOffset = Quaternion.Euler(-80f, 0f, 0f);
 
-        // ----------------------------------------------------
-        // Appelé quand on appuie sur G
-        // ----------------------------------------------------
+        // Toggle G
         public static void OnBackTorchKeyPressed(Player player)
         {
-            if (player == null)
-                return;
-
-            // Si une torche est déjà sur le dos, on la retire (toggle)
             if (_backTorchObject != null)
             {
-                WearableTorchesPlugin.Log.LogInfo("G pressé : torche déjà sur le dos, on la détruit.");
                 DestroyBackTorch();
                 return;
             }
 
-            // On cherche une torche actuellement en main (droite ou gauche)
-            ItemDrop.ItemData torchItem = GetTorchInHands(player);
+            var torchItem = GetTorchInHands(player);
             if (torchItem == null)
             {
-                WearableTorchesPlugin.Log.LogInfo("G pressé : aucune torche en main, rien à faire.");
+                WearableTorchesPlugin.Log.LogInfo("No torch in hands");
                 return;
             }
 
             EquipBackTorchFromItem(player, torchItem);
         }
 
-        // ----------------------------------------------------
-        // Récupère l'ItemData d'une torche dans les mains
-        // (via réflexion sur GetRightItem / GetLeftItem)
-        // ----------------------------------------------------
+        // Reflection: Get hand items
         private static ItemDrop.ItemData GetTorchInHands(Player player)
         {
             try
             {
-                BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
 
-                MethodInfo getRightItem = typeof(Player).GetMethod("GetRightItem", flags);
-                MethodInfo getLeftItem = typeof(Player).GetMethod("GetLeftItem", flags);
+                var getRight = typeof(Player).GetMethod("GetRightItem", flags);
+                var getLeft = typeof(Player).GetMethod("GetLeftItem", flags);
 
-                ItemDrop.ItemData right = null;
-                ItemDrop.ItemData left = null;
-
-                if (getRightItem != null)
-                    right = (ItemDrop.ItemData)getRightItem.Invoke(player, null);
-
-                if (getLeftItem != null)
-                    left = (ItemDrop.ItemData)getLeftItem.Invoke(player, null);
+                var right = getRight != null ? (ItemDrop.ItemData)getRight.Invoke(player, null) : null;
+                var left = getLeft != null ? (ItemDrop.ItemData)getLeft.Invoke(player, null) : null;
 
                 if (IsTorch(right)) return right;
                 if (IsTorch(left)) return left;
@@ -108,7 +85,7 @@ namespace WearableTorches
             }
             catch (Exception e)
             {
-                WearableTorchesPlugin.Log.LogError($"GetTorchInHands : erreur réflexion : {e}");
+                WearableTorchesPlugin.Log.LogError($"Reflection error: {e}");
                 return null;
             }
         }
@@ -116,233 +93,117 @@ namespace WearableTorches
         private static bool IsTorch(ItemDrop.ItemData item)
         {
             if (item == null) return false;
-            string itemName = item.m_shared?.m_name ?? "";
-            return itemName.ToLower().Contains("torch");
+            return (item.m_shared?.m_name ?? "").ToLower().Contains("torch");
         }
 
-        // ----------------------------------------------------
-        // Crée la torche de dos :
-        // - mesh depuis m_dropPrefab
-        // - rotation basée sur la torche en main (+ offset)
-        // - flammes clonées depuis la torche en main
-        // - light créée à la main
-        // ----------------------------------------------------
+        // Equip torch on back
         private static void EquipBackTorchFromItem(Player player, ItemDrop.ItemData item)
         {
-            if (item == null)
-            {
-                WearableTorchesPlugin.Log.LogWarning("EquipBackTorchFromItem : item null.");
-                return;
-            }
-
-            // 1) Mesh propre depuis le prefab
-            GameObject prefab = item.m_dropPrefab;
+            var prefab = item.m_dropPrefab;
             if (prefab == null)
             {
-                WearableTorchesPlugin.Log.LogWarning("EquipBackTorchFromItem : m_dropPrefab null.");
+                WearableTorchesPlugin.Log.LogWarning("Prefab is null");
                 return;
             }
 
-            // 2) Point d’attache
-            Transform attach = player.transform;
+            var attach = FindBackAttach(player);
 
-            Transform spline = player.transform.Find("BackTorchSpline");
-            Transform spine = player.transform.Find("Visual/Armature/Hips/Spine");
-            Transform hips = player.transform.Find("Visual/Armature/Hips");
+            DestroyBackTorch();
 
-            if (spline != null)
-            {
-                attach = spline;
-                WearableTorchesPlugin.Log.LogInfo("Back torch attach = BackTorchSpline");
-            }
-            else if (spine != null)
-            {
-                attach = spine;
-                WearableTorchesPlugin.Log.LogInfo("Back torch attach = Spine");
-            }
-            else if (hips != null)
-            {
-                attach = hips;
-                WearableTorchesPlugin.Log.LogInfo("Back torch attach = Hips");
-            }
-            else
-            {
-                WearableTorchesPlugin.Log.LogWarning("Hips/Spine introuvables, attache sur le root du player.");
-            }
+            // ***** FIX: we do NOT instantiate the prefab *****
+            _backTorchObject = new GameObject("BackTorchObject");
+            _backTorchObject.transform.SetParent(attach, false);
 
-            // 3) On détruit un éventuel ancien clone
-            if (_backTorchObject != null)
-            {
-                UnityEngine.Object.Destroy(_backTorchObject);
-                _backTorchObject = null;
-            }
+            _backTorchObject.transform.localRotation = BackRotationOffset;
+            _backTorchObject.transform.localPosition = new Vector3(-0.0024f, -0.002f, -0.0017f);
 
-            // 4) On instancie le mesh du prefab comme objet principal
-            _backTorchObject = UnityEngine.Object.Instantiate(prefab, attach, false);
-            _backTorchObject.name = "BackTorchObject";
-
-            // 5) Récupérer la rotation de la torche en main pour orienter celle du dos
-            Transform handTorchRoot = FindHandTorchRoot(player);
-            if (handTorchRoot != null)
-            {
-                // même rotation locale que la torche en main, + offset pour la position dans le dos
-                _backTorchObject.transform.localRotation = handTorchRoot.localRotation * BackRotationOffset;
-            }
-            else
-            {
-                // fallback : simple rotation d’offset
-                _backTorchObject.transform.localRotation = BackRotationOffset;
-            }
-
-            // Position sur le dos (offset dans l'espace local du bone / spline)
-            _backTorchObject.transform.localPosition = new Vector3(-0.002f, 0.0f, 0.0022f);
-
-            // Neutralise le scale minuscule du bone
-            Vector3 parentScale = attach.lossyScale;
-            Vector3 invScale = new Vector3(
-                parentScale.x != 0f ? 1f / parentScale.x : 1f,
-                parentScale.y != 0f ? 1f / parentScale.y : 1f,
-                parentScale.z != 0f ? 1f / parentScale.z : 1f
+            // Fix scaling
+            Vector3 ps = attach.lossyScale;
+            _backTorchObject.transform.localScale = new Vector3(
+                ps.x != 0 ? 1f / ps.x : 1f,
+                ps.y != 0 ? 1f / ps.y : 1f,
+                ps.z != 0 ? 1f / ps.z : 1f
             );
-            _backTorchObject.transform.localScale = invScale;
 
-            // 6) On supprime ce qui sert au loot/physique sur le mesh
-            var drop = _backTorchObject.GetComponent<ItemDrop>();
-            if (drop != null) drop.enabled = false;
-
-            var rb = _backTorchObject.GetComponent<Rigidbody>();
-            if (rb != null)
+            // Copy mesh from prefab → but never instantiate ItemDrop
+            foreach (var renderer in prefab.GetComponentsInChildren<MeshRenderer>(true))
             {
-                rb.isKinematic = true;
-                rb.useGravity = false;
+                var clone = UnityEngine.Object.Instantiate(renderer.gameObject, _backTorchObject.transform, false);
+                clone.name = "BackTorchMesh";
             }
 
-            foreach (var col in _backTorchObject.GetComponentsInChildren<Collider>(true))
-                col.enabled = false;
-
-            // 7) On ajoute les FLAMMES en clonant l'objet FX de la torche en main
-            GameObject flamesSource = FindTorchFlamesObject(player);
-            if (flamesSource != null)
+            // Flames
+            var fx = FindTorchFlamesObject(player);
+            if (fx != null)
             {
-                var flamesClone = UnityEngine.Object.Instantiate(flamesSource, _backTorchObject.transform, false);
-                flamesClone.name = "BackTorchFlames";
-
-                // Placement et rotation dans l’espace local de la torche du dos
-                flamesClone.transform.localPosition = FlameOffset;
-                flamesClone.transform.localRotation = flamesSource.transform.localRotation;
-
-                WearableTorchesPlugin.Log.LogInfo("Flammes clonées depuis la torche en main.");
-            }
-            else
-            {
-                WearableTorchesPlugin.Log.LogWarning("FindTorchFlamesObject: aucune source de flammes trouvée, pas de FX feu.");
+                var clone = UnityEngine.Object.Instantiate(fx, _backTorchObject.transform, false);
+                clone.name = "BackTorchFlames";
+                clone.transform.localRotation = Quaternion.identity;
+                clone.transform.localPosition = FlameOffset;
             }
 
-            // 8) On crée une LIGHT dédiée (dans l’espace local de la torche)
-            GameObject lightGO = new GameObject("BackTorchLight");
+            // Light
+            var lightGO = new GameObject("BackTorchLight");
             lightGO.transform.SetParent(_backTorchObject.transform, false);
+            lightGO.transform.localRotation = Quaternion.identity;
             lightGO.transform.localPosition = LightOffset;
 
-            Light l = lightGO.AddComponent<Light>();
-            l.type = LightType.Point;
-            l.color = new Color(1.0f, 0.3f, 0.2f);
-            l.range = 15f;
-            l.intensity = 1.8f;
-            l.shadows = LightShadows.Soft;
-
-            WearableTorchesPlugin.Log.LogInfo("Light créée pour la torche dans le dos.");
-
-            // 9) On s’assure que tout le visuel est actif
-            _backTorchObject.SetActive(true);
-            foreach (var r in _backTorchObject.GetComponentsInChildren<Renderer>(true))
-            {
-                r.enabled = true;
-                r.gameObject.SetActive(true);
-            }
-
-            WearableTorchesPlugin.Log.LogInfo("Torche de dos EQUIPÉE : mesh + flammes + light (via touche G).");
+            var light = lightGO.AddComponent<Light>();
+            light.type = LightType.Point;
+            light.color = new Color(1f, 0.55f, 0.25f);
+            light.range = 15f;
+            light.intensity = 1.9f;
+            light.shadows = LightShadows.Soft;
         }
 
-        // ----------------------------------------------------
-        // Cherche le "root" mesh de la torche en main
-        // (sert à copier sa rotation locale)
-        // ----------------------------------------------------
-        private static Transform FindHandTorchRoot(Player player)
+        // Locate back bone
+        private static Transform FindBackAttach(Player player)
         {
-            Transform[] all = player.GetComponentsInChildren<Transform>(true);
-
-            foreach (Transform t in all)
+            string[] backBones =
             {
-                string n = t.name.ToLower();
-                if (!n.Contains("torch"))
-                    continue;
+                "Visual/Armature/Hips/Spine/Spine1/Spine2",
+                "Visual/Armature/Hips/Spine/Spine1",
+                "Visual/Armature/Hips/Spine"
+            };
 
-                MeshRenderer meshRenderer = t.GetComponentInChildren<MeshRenderer>(true);
-                SkinnedMeshRenderer skinned = t.GetComponentInChildren<SkinnedMeshRenderer>(true);
-                bool hasMesh = (meshRenderer != null || skinned != null);
-
-                if (!hasMesh)
-                    continue;
-
-                WearableTorchesPlugin.Log.LogInfo($"FindHandTorchRoot -> {t.name}");
-                return t;
+            foreach (string path in backBones)
+            {
+                var t = player.transform.Find(path);
+                if (t != null) return t;
             }
 
-            WearableTorchesPlugin.Log.LogWarning("FindHandTorchRoot: aucun root de torche (mesh) trouvé.");
-            return null;
+            return player.transform;
         }
 
-        // ----------------------------------------------------
-        // Recherche de l'objet qui porte les flammes sur la torche en main
-        // (on veut un objet avec ParticleSystem mais SANS mesh)
-        // ----------------------------------------------------
+        // Find FX (not mesh)
         private static GameObject FindTorchFlamesObject(Player player)
         {
-            Transform[] all = player.GetComponentsInChildren<Transform>(true);
-
-            foreach (Transform t in all)
+            foreach (var t in player.GetComponentsInChildren<Transform>(true))
             {
-                string n = t.name.ToLower();
-                if (!n.Contains("torch"))
+                if (!t.name.ToLower().Contains("torch"))
                     continue;
 
-                ParticleSystem ps = t.GetComponentInChildren<ParticleSystem>(true);
-                if (ps == null)
-                    continue;
+                var ps = t.GetComponentInChildren<ParticleSystem>(true);
+                if (ps == null) continue;
 
-                // On évite les objets qui ont déjà un mesh, on veut surtout le FX
-                MeshRenderer meshRenderer = t.GetComponentInChildren<MeshRenderer>(true);
-                SkinnedMeshRenderer skinned = t.GetComponentInChildren<SkinnedMeshRenderer>(true);
-                bool hasMesh = (meshRenderer != null || skinned != null);
+                var mesh = t.GetComponentInChildren<MeshRenderer>(true);
+                if (mesh != null) continue;
 
-                if (hasMesh)
-                    continue;
-
-                WearableTorchesPlugin.Log.LogInfo($"FindTorchFlamesObject -> {t.name}");
                 return t.gameObject;
             }
-
-            WearableTorchesPlugin.Log.LogWarning("FindTorchFlamesObject: aucune transform 'torch' avec uniquement des ParticleSystem trouvée.");
             return null;
         }
 
-        // ----------------------------------------------------
-        // Destruction du clone de dos
-        // ----------------------------------------------------
+        // Destroy
         private static void DestroyBackTorch()
         {
-            if (_backTorchObject != null)
-            {
-                UnityEngine.Object.Destroy(_backTorchObject);
-                _backTorchObject = null;
-                WearableTorchesPlugin.Log.LogInfo("Torche de dos DÉTRUITE.");
-            }
-        }
-    }
+            if (_backTorchObject == null)
+                return;
 
-    // --------------------------------------------------------
-    // IMPORTANT :
-    // On NE patch plus Player.EquipItem ici → plus d’erreur
-    // "Undefined target method".
-    // --------------------------------------------------------
+            UnityEngine.Object.Destroy(_backTorchObject);
+            _backTorchObject = null;
+        }
+
+        public static void ForceDestroyBackTorch() => DestroyBackTorch();
+    }
 }
