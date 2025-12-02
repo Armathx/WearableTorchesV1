@@ -3,7 +3,7 @@ using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
-namespace WearableTorches
+namespace WearableTorches //3h~~
 {
     [BepInPlugin("com.thomas.wearabletorches", "Wearable Torches", "1.0.0")]
     public class WearableTorchesPlugin : BaseUnityPlugin
@@ -50,7 +50,7 @@ namespace WearableTorches
         {
             _equippedTorch = item;
 
-            // On essaie d'abord un bone du mesh plutôt que le root
+            //Try player before bones
             Transform attach = player.transform;
 
             Transform hips = player.transform.Find("Visual/Armature/Hips");
@@ -80,7 +80,7 @@ namespace WearableTorches
             _backTorchLight.transform.SetParent(attach, false);
 
             // Offset relativement petit, autour du bas du torse
-            Vector3 localPos = new Vector3(-0.0015f, 0.0015f, 0.0025f);
+            Vector3 localPos = new Vector3(-0.0015f, 0.0015f, 0.0025f); //WTF LE SCALE DU SKELET
             _backTorchLight.transform.localPosition = localPos;
 
             var light = _backTorchLight.GetComponent<Light>();
@@ -111,7 +111,7 @@ namespace WearableTorches
                 _backTorchObject.transform.localPosition = localPos;
                 _backTorchObject.transform.localRotation = Quaternion.Euler(-90f, 0f, 0f);
 
-                // >>> COMPENSATION DE SCALE DU BONE <<<
+                //On compense ein
                 Vector3 parentScale = attach.lossyScale;
                 Vector3 invScale = new Vector3(
                     parentScale.x != 0f ? 1f / parentScale.x : 1f,
@@ -170,7 +170,7 @@ namespace WearableTorches
         }
     }
 
-    // Patch : clic droit sur un item de l’inventaire
+    //Right click please on a torch
     [HarmonyPatch(typeof(InventoryGui), "OnRightClickItem")]
     public static class InventoryGui_OnRightClickItem_Patch
     {
@@ -181,9 +181,9 @@ namespace WearableTorches
             WearableTorchesPlugin.Log.LogInfo($"OnRightClickItem appelé sur : {itemName}");
 
             if (item == null)
-                return true; // rien à faire
+                return true; 
 
-            // On ne s’occupe que des torches
+            //QUe les torches
             var name = item.m_shared?.m_name ?? "";
             if (!name.ToLower().Contains("torch"))
             {
@@ -198,10 +198,10 @@ namespace WearableTorches
                 return true;
             }
 
-            // Notre logique d’équipement / déséquipement
+            //TOggle
             WearableTorchManager.ToggleBackTorch(player, item);
 
-            // On bloque le comportement normal du clic droit
+            //  sinon on bloque
             return false;
         }
     }
