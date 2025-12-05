@@ -29,7 +29,7 @@ namespace WearableTorches
 
             // local input
             var localPlayer = Player.m_localPlayer;
-            if (localPlayer != null && ZInput.GetKeyDown(KeyCode.G))
+            if (localPlayer != null && ZInput.GetKeyDown(KeyCode.R))
             {
                 WearableTorchManager.OnBackTorchKeyPressed(localPlayer);
             }
@@ -77,11 +77,11 @@ namespace WearableTorches
 
             if (!current)
             {
-                // turn ON -> need a torch (hands OR inventory) + prefab name
-                var torchItem = GetTorchFromHandsOrInventory(player);
+                // turn ON -> need a torch + prefab name
+                var torchItem = GetTorchInHands(player);
                 if (torchItem == null)
                 {
-                    WearableTorchesPlugin.Log.LogInfo("Back torch toggle: no torch in hands or inventory");
+                    WearableTorchesPlugin.Log.LogInfo("Back torch toggle: no torch in hands");
                     return;
                 }
 
@@ -104,12 +104,8 @@ namespace WearableTorches
                 zdo.Set(ZdoKeyBackTorch, true);
                 WearableTorchesPlugin.Log.LogInfo($"Back torch ON for {player.GetPlayerName()} prefab={prefabName}");
 
-                // If there IS a torch in hands, unequip it (sound, animation)
-                var handTorch = GetTorchInHands(player);
-                if (handTorch != null)
-                {
-                    TryUnequipTorchFromHands(player, handTorch);
-                }
+                // Unequip from hands + play equip/unequip sound
+                TryUnequipTorchFromHands(player, torchItem);
             }
             else
             {
@@ -134,7 +130,8 @@ namespace WearableTorches
             bool hasBackTorch = zdo.GetBool(ZdoKeyBackTorch, false);
             string prefabName = zdo.GetString(ZdoKeyBackTorchPrefab, "");
 
-            // if player has back torch and equips a torch in hands → auto OFF (owner only)
+            // NEW: if player has a back torch and equips a torch in hands,
+            // we automatically turn off the back torch (owner only).
             if (hasBackTorch)
             {
                 var torchInHands = GetTorchInHands(player);
@@ -142,7 +139,7 @@ namespace WearableTorches
                 {
                     zdo.Set(ZdoKeyBackTorch, false);
                     zdo.Set(ZdoKeyBackTorchPrefab, "");
-                    hasBackTorch = false;
+                    hasBackTorch = false; // local override so we also destroy visual this frame
                     WearableTorchesPlugin.Log.LogInfo(
                         $"Back torch auto OFF for {player.GetPlayerName()} (torch equipped in hand)");
                 }
@@ -186,18 +183,6 @@ namespace WearableTorches
             return player.GetComponent<ZNetView>();
         }
 
-        // Torch search priority: hands → inventory
-        private static ItemDrop.ItemData GetTorchFromHandsOrInventory(Player player)
-        {
-            // 1) hands
-            var fromHands = GetTorchInHands(player);
-            if (fromHands != null)
-                return fromHands;
-
-            // 2) inventory
-            return GetTorchFromInventory(player);
-        }
-
         // Reflection: Get hand items (used by owner & sync)
         private static ItemDrop.ItemData GetTorchInHands(Player player)
         {
@@ -218,36 +203,9 @@ namespace WearableTorches
             }
             catch (Exception e)
             {
-                WearableTorchesPlugin.Log.LogError($"Reflection error (hands): {e}");
+                WearableTorchesPlugin.Log.LogError($"Reflection error: {e}");
                 return null;
             }
-        }
-
-        // Inventory: find any torch item (not necessarily equipped)
-        private static ItemDrop.ItemData GetTorchFromInventory(Player player)
-        {
-            try
-            {
-                var inv = player.GetInventory();
-                if (inv == null)
-                    return null;
-
-                var all = inv.GetAllItems();
-                if (all == null)
-                    return null;
-
-                foreach (var item in all)
-                {
-                    if (IsTorch(item))
-                        return item;
-                }
-            }
-            catch (Exception e)
-            {
-                WearableTorchesPlugin.Log.LogError($"Inventory search error: {e}");
-            }
-
-            return null;
         }
 
         private static bool IsTorch(ItemDrop.ItemData item)
@@ -356,9 +314,9 @@ namespace WearableTorches
 
             var light = lightGO.AddComponent<Light>();
             light.type = LightType.Point;
-            light.color = new Color(1f, 0.50f, 0.20f);
+            light.color = new Color(1f, 0.52f, 0.22f);
             light.range = 14f;
-            light.intensity = 1.4f;
+            light.intensity = 1.35f;
             light.shadows = LightShadows.Soft;
 
             return backTorch;
