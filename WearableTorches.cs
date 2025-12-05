@@ -27,14 +27,6 @@ namespace WearableTorches
             if (ZInput.instance == null)
                 return;
 
-            // local input
-            var localPlayer = Player.m_localPlayer;
-            if (localPlayer != null && ZInput.GetKeyDown(KeyCode.R))
-            {
-                WearableTorchManager.OnBackTorchKeyPressed(localPlayer);
-            }
-
-            // sync all players
             var allPlayers = Player.GetAllPlayers();
             foreach (var p in allPlayers)
             {
@@ -50,73 +42,17 @@ namespace WearableTorches
 
     public static class WearableTorchManager
     {
-        private static readonly Dictionary<Player, GameObject> BackTorches = new Dictionary<Player, GameObject>();
+        private static readonly Dictionary<Player, GameObject> BackTorches =
+            new Dictionary<Player, GameObject>();
 
-        private const string ZdoKeyBackTorch = "WearableTorches_BackTorch";
-        private const string ZdoKeyBackTorchPrefab = "WearableTorches_BackTorchPrefab";
+        public const string ZdoKeyBackTorch = "WearableTorches_BackTorch";
+        public const string ZdoKeyBackTorchPrefab = "WearableTorches_BackTorchPrefab";
 
         private static readonly Vector3 FlameOffset = new Vector3(0f, 0f, 0.61f);
         private static readonly Vector3 LightOffset = new Vector3(0f, 0f, 0.61f);
         private static readonly Quaternion BackRotationOffset = Quaternion.Euler(-80f, 0f, 0f);
 
-        // Toggle G (owner)
-        public static void OnBackTorchKeyPressed(Player player)
-        {
-            var nview = GetNView(player);
-            if (nview == null)
-                return;
-
-            if (!nview.IsOwner())
-                return;
-
-            var zdo = nview.GetZDO();
-            if (zdo == null)
-                return;
-
-            bool current = zdo.GetBool(ZdoKeyBackTorch, false);
-
-            if (!current)
-            {
-                // turn ON -> need a torch + prefab name
-                var torchItem = GetTorchInHands(player);
-                if (torchItem == null)
-                {
-                    WearableTorchesPlugin.Log.LogInfo("Back torch toggle: no torch in hands");
-                    return;
-                }
-
-                var dropPrefab = torchItem.m_dropPrefab;
-                if (dropPrefab == null)
-                {
-                    WearableTorchesPlugin.Log.LogWarning("Back torch toggle: dropPrefab null");
-                    return;
-                }
-
-                string prefabName = dropPrefab.name;
-                if (string.IsNullOrEmpty(prefabName))
-                {
-                    WearableTorchesPlugin.Log.LogWarning("Back torch toggle: prefab name empty");
-                    return;
-                }
-
-                // Write network state
-                zdo.Set(ZdoKeyBackTorchPrefab, prefabName);
-                zdo.Set(ZdoKeyBackTorch, true);
-                WearableTorchesPlugin.Log.LogInfo($"Back torch ON for {player.GetPlayerName()} prefab={prefabName}");
-
-                // Unequip from hands + play equip/unequip sound
-                TryUnequipTorchFromHands(player, torchItem);
-            }
-            else
-            {
-                // turn OFF
-                zdo.Set(ZdoKeyBackTorch, false);
-                zdo.Set(ZdoKeyBackTorchPrefab, "");
-                WearableTorchesPlugin.Log.LogInfo($"Back torch OFF for {player.GetPlayerName()}");
-            }
-        }
-
-        // Sync per player (all clients)
+        // Network sync for all players
         public static void SyncBackTorchForPlayer(Player player)
         {
             var nview = GetNView(player);
@@ -130,32 +66,42 @@ namespace WearableTorches
             bool hasBackTorch = zdo.GetBool(ZdoKeyBackTorch, false);
             string prefabName = zdo.GetString(ZdoKeyBackTorchPrefab, "");
 
-            // NEW: if player has a back torch and equips a torch in hands,
-            // we automatically turn off the back torch (owner only).
-            if (hasBackTorch)
+            // Auto OFF if owner equips a torch in hands
+            if (hasBackTorch && nview.IsOwner())
             {
                 var torchInHands = GetTorchInHands(player);
-                if (torchInHands != null && nview.IsOwner())
+                if (torchInHands != null)
                 {
+                    GameObject prefabToUnhide = null;
+                    if (!string.IsNullOrEmpty(prefabName) && ZNetScene.instance != null)
+                        prefabToUnhide = ZNetScene.instance.GetPrefab(prefabName);
+
+                    HideVanillaTorchVisuals(player, prefabToUnhide, false);
+
                     zdo.Set(ZdoKeyBackTorch, false);
                     zdo.Set(ZdoKeyBackTorchPrefab, "");
-                    hasBackTorch = false; // local override so we also destroy visual this frame
+                    hasBackTorch = false;
+
                     WearableTorchesPlugin.Log.LogInfo(
-                        $"Back torch auto OFF for {player.GetPlayerName()} (torch equipped in hand)");
+                        "Back torch auto OFF (torch in hands) for " + player.GetPlayerName());
                 }
             }
 
-            BackTorches.TryGetValue(player, out var existing);
+            GameObject existing;
+            BackTorches.TryGetValue(player, out existing);
 
             if (hasBackTorch && !string.IsNullOrEmpty(prefabName))
             {
                 if (existing == null)
                 {
-                    // spawn visual based on prefab name (same for all clients)
-                    var prefab = ZNetScene.instance != null ? ZNetScene.instance.GetPrefab(prefabName) : null;
+                    var prefab = ZNetScene.instance != null
+                        ? ZNetScene.instance.GetPrefab(prefabName)
+                        : null;
+
                     if (prefab == null)
                     {
-                        WearableTorchesPlugin.Log.LogWarning($"Back torch: prefab '{prefabName}' not found in ZNetScene");
+                        WearableTorchesPlugin.Log.LogWarning(
+                            "Back torch: prefab '" + prefabName + "' not found in ZNetScene");
                         return;
                     }
 
@@ -174,16 +120,20 @@ namespace WearableTorches
             }
         }
 
-        // helper: get ZNetView from Player
+        // --- helpers ---
+
         private static ZNetView GetNView(Player player)
         {
-            if (player == null)
-                return null;
-
-            return player.GetComponent<ZNetView>();
+            return player != null ? player.GetComponent<ZNetView>() : null;
         }
 
-        // Reflection: Get hand items (used by owner & sync)
+        internal static bool IsTorch(ItemDrop.ItemData item)
+        {
+            if (item == null) return false;
+            return (item.m_shared != null ? item.m_shared.m_name : "").ToLower().Contains("torch");
+        }
+
+        // torch in hands (right / left)
         private static ItemDrop.ItemData GetTorchInHands(Player player)
         {
             try
@@ -193,8 +143,12 @@ namespace WearableTorches
                 var getRight = typeof(Player).GetMethod("GetRightItem", flags);
                 var getLeft = typeof(Player).GetMethod("GetLeftItem", flags);
 
-                var right = getRight != null ? (ItemDrop.ItemData)getRight.Invoke(player, null) : null;
-                var left = getLeft != null ? (ItemDrop.ItemData)getLeft.Invoke(player, null) : null;
+                var right = getRight != null
+                    ? (ItemDrop.ItemData)getRight.Invoke(player, null)
+                    : null;
+                var left = getLeft != null
+                    ? (ItemDrop.ItemData)getLeft.Invoke(player, null)
+                    : null;
 
                 if (IsTorch(right)) return right;
                 if (IsTorch(left)) return left;
@@ -203,68 +157,12 @@ namespace WearableTorches
             }
             catch (Exception e)
             {
-                WearableTorchesPlugin.Log.LogError($"Reflection error: {e}");
+                WearableTorchesPlugin.Log.LogError("GetTorchInHands reflection error: " + e);
                 return null;
             }
         }
 
-        private static bool IsTorch(ItemDrop.ItemData item)
-        {
-            if (item == null) return false;
-            return (item.m_shared?.m_name ?? "").ToLower().Contains("torch");
-        }
-
-        // Try unequip torch from hands + play equip SFX via Player.UnequipItem
-        private static void TryUnequipTorchFromHands(Player player, ItemDrop.ItemData torchItem)
-        {
-            if (player == null || torchItem == null)
-                return;
-
-            try
-            {
-                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-                // 1) Try UnequipItem(ItemDrop.ItemData, bool triggerEffects)
-                var miBool = typeof(Player).GetMethod(
-                    "UnequipItem",
-                    flags,
-                    null,
-                    new Type[] { typeof(ItemDrop.ItemData), typeof(bool) },
-                    null
-                );
-
-                if (miBool != null)
-                {
-                    miBool.Invoke(player, new object[] { torchItem, true });
-                    WearableTorchesPlugin.Log.LogInfo("UnequipItem(item, true) called for back torch");
-                    return;
-                }
-
-                // 2) Fallback: UnequipItem(ItemDrop.ItemData)
-                var miSimple = typeof(Player).GetMethod(
-                    "UnequipItem",
-                    flags,
-                    null,
-                    new Type[] { typeof(ItemDrop.ItemData) },
-                    null
-                );
-
-                if (miSimple != null)
-                {
-                    miSimple.Invoke(player, new object[] { torchItem });
-                    WearableTorchesPlugin.Log.LogInfo("UnequipItem(item) called for back torch");
-                    return;
-                }
-
-                WearableTorchesPlugin.Log.LogWarning("Player.UnequipItem not found via reflection");
-            }
-            catch (Exception e)
-            {
-                WearableTorchesPlugin.Log.LogError($"TryUnequipTorchFromHands error: {e}");
-            }
-        }
-
-        // Create visual torch on back (no network, no loot)
+        // visual torch on back (no network, no loot)
         private static GameObject CreateBackTorchVisual(Player player, GameObject prefab)
         {
             if (prefab == null)
@@ -278,7 +176,6 @@ namespace WearableTorches
             backTorch.transform.localRotation = BackRotationOffset;
             backTorch.transform.localPosition = new Vector3(-0.0026f, -0.002f, -0.0017f);
 
-            // fix scaling
             Vector3 ps = attach.lossyScale;
             backTorch.transform.localScale = new Vector3(
                 ps.x != 0 ? 1f / ps.x : 1f,
@@ -293,8 +190,8 @@ namespace WearableTorches
                 cloneMesh.name = "BackTorchMesh";
             }
 
-            // flames: try from player → fallback to prefab
-            GameObject fxPrefab = FindTorchFlamesObject(player);
+            // flames: player -> prefab
+            GameObject fxPrefab = FindTorchFlamesOnPlayer(player);
             if (fxPrefab == null)
                 fxPrefab = FindTorchFlamesInPrefab(prefab);
 
@@ -322,9 +219,93 @@ namespace WearableTorches
             return backTorch;
         }
 
+        // Hide / show vanilla torch meshes that match the torch prefab
+        internal static void HideVanillaTorchVisuals(Player player, GameObject torchPrefab, bool hide)
+        {
+            if (player == null || torchPrefab == null)
+                return;
+
+            // collect meshes & materials from prefab
+            Renderer[] prefabRenderers = torchPrefab.GetComponentsInChildren<Renderer>(true);
+            HashSet<Material> prefabMaterials = new HashSet<Material>();
+            HashSet<Mesh> prefabMeshes = new HashSet<Mesh>();
+
+            foreach (Renderer pr in prefabRenderers)
+            {
+                Material[] mats = pr.sharedMaterials;
+                if (mats != null)
+                {
+                    foreach (Material m in mats)
+                    {
+                        if (m != null && !prefabMaterials.Contains(m))
+                            prefabMaterials.Add(m);
+                    }
+                }
+
+                MeshFilter mf = pr.GetComponent<MeshFilter>();
+                if (mf != null && mf.sharedMesh != null && !prefabMeshes.Contains(mf.sharedMesh))
+                    prefabMeshes.Add(mf.sharedMesh);
+
+                SkinnedMeshRenderer smrPr = pr as SkinnedMeshRenderer;
+                if (smrPr != null && smrPr.sharedMesh != null && !prefabMeshes.Contains(smrPr.sharedMesh))
+                    prefabMeshes.Add(smrPr.sharedMesh);
+            }
+
+            Renderer[] playerRenderers = player.GetComponentsInChildren<Renderer>(true);
+            foreach (Renderer r in playerRenderers)
+            {
+                if (IsUnderBackTorchObject(r.transform))
+                    continue;
+
+                bool match = false;
+
+                MeshFilter mf2 = r.GetComponent<MeshFilter>();
+                if (mf2 != null && mf2.sharedMesh != null &&
+                    prefabMeshes.Contains(mf2.sharedMesh))
+                    match = true;
+
+                if (!match)
+                {
+                    SkinnedMeshRenderer smr2 = r as SkinnedMeshRenderer;
+                    if (smr2 != null && smr2.sharedMesh != null &&
+                        prefabMeshes.Contains(smr2.sharedMesh))
+                        match = true;
+                }
+
+                if (!match)
+                {
+                    Material[] mats2 = r.sharedMaterials;
+                    if (mats2 != null)
+                    {
+                        foreach (Material m2 in mats2)
+                        {
+                            if (m2 != null && prefabMaterials.Contains(m2))
+                            {
+                                match = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (match)
+                    r.enabled = !hide;
+            }
+        }
+
+        private static bool IsUnderBackTorchObject(Transform t)
+        {
+            while (t != null)
+            {
+                if (t.name == "BackTorchObject")
+                    return true;
+                t = t.parent;
+            }
+            return false;
+        }
+
         #region Finder
 
-        // Locate back bone
         private static Transform FindBackAttach(Player player)
         {
             string[] backBones =
@@ -343,8 +324,7 @@ namespace WearableTorches
             return player.transform;
         }
 
-        // Find FX in player's hierarchy (old behavior)
-        private static GameObject FindTorchFlamesObject(Player player)
+        private static GameObject FindTorchFlamesOnPlayer(Player player)
         {
             foreach (var t in player.GetComponentsInChildren<Transform>(true))
             {
@@ -365,7 +345,6 @@ namespace WearableTorches
             return null;
         }
 
-        // Find FX in torch prefab (ParticleSystem without mesh)
         private static GameObject FindTorchFlamesInPrefab(GameObject prefab)
         {
             if (prefab == null)
@@ -387,7 +366,6 @@ namespace WearableTorches
 
         #endregion
 
-        // Destroy all visuals
         private static void DestroyBackTorch()
         {
             foreach (var kvp in BackTorches)
@@ -398,6 +376,108 @@ namespace WearableTorches
             BackTorches.Clear();
         }
 
-        public static void ForceDestroyBackTorch() => DestroyBackTorch();
+        public static void ForceDestroyBackTorch()
+        {
+            DestroyBackTorch();
+        }
+    }
+
+    // HideHandItems (R pressed) -> torch to custom back, hide vanilla mesh
+    [HarmonyPatch(typeof(Humanoid), "HideHandItems")]
+    public static class Humanoid_HideHandItems_Patch
+    {
+        static void Postfix(Humanoid __instance, bool onlyRightHand, bool animation, ref bool __result)
+        {
+            if (!__result)
+                return;
+
+            Player player = __instance as Player;
+            if (player == null)
+                return;
+
+            var nview = player.GetComponent<ZNetView>();
+            if (nview == null || !nview.IsOwner())
+                return;
+
+            var zdo = nview.GetZDO();
+            if (zdo == null)
+                return;
+
+            var tr = Traverse.Create(player);
+            var hiddenLeft = tr.Field<ItemDrop.ItemData>("m_hiddenLeftItem").Value;
+            var hiddenRight = tr.Field<ItemDrop.ItemData>("m_hiddenRightItem").Value;
+
+            ItemDrop.ItemData torchItem = null;
+
+            if (WearableTorchManager.IsTorch(hiddenRight))
+                torchItem = hiddenRight;
+            else if (WearableTorchManager.IsTorch(hiddenLeft))
+                torchItem = hiddenLeft;
+
+            if (torchItem == null)
+            {
+                zdo.Set(WearableTorchManager.ZdoKeyBackTorch, false);
+                zdo.Set(WearableTorchManager.ZdoKeyBackTorchPrefab, "");
+                return;
+            }
+
+            var dropPrefab = torchItem.m_dropPrefab;
+            if (dropPrefab == null)
+                return;
+
+            string prefabName = dropPrefab.name;
+            if (string.IsNullOrEmpty(prefabName))
+                return;
+
+            zdo.Set(WearableTorchManager.ZdoKeyBackTorchPrefab, prefabName);
+            zdo.Set(WearableTorchManager.ZdoKeyBackTorch, true);
+
+            // hide vanilla torch visuals that use this prefab
+            WearableTorchManager.HideVanillaTorchVisuals(player, dropPrefab, true);
+
+            WearableTorchesPlugin.Log.LogInfo(
+                "Back torch ON (HideHandItems) for " + player.GetPlayerName() +
+                " prefab=" + prefabName);
+        }
+    }
+
+    // ShowHandItems (R again) -> clear back state, show vanilla mesh again
+    [HarmonyPatch]
+    public static class Humanoid_ShowHandItems_Patch
+    {
+        static MethodInfo TargetMethod()
+        {
+            return AccessTools.Method(typeof(Humanoid), "ShowHandItems",
+                new Type[] { typeof(bool), typeof(bool) });
+        }
+
+        static void Postfix(Humanoid __instance, bool onlyRightHand, bool animation)
+        {
+            Player player = __instance as Player;
+            if (player == null)
+                return;
+
+            var nview = player.GetComponent<ZNetView>();
+            if (nview == null || !nview.IsOwner())
+                return;
+
+            var zdo = nview.GetZDO();
+            if (zdo == null)
+                return;
+
+            string prefabName = zdo.GetString(WearableTorchManager.ZdoKeyBackTorchPrefab, "");
+            GameObject prefab = null;
+            if (!string.IsNullOrEmpty(prefabName) && ZNetScene.instance != null)
+                prefab = ZNetScene.instance.GetPrefab(prefabName);
+
+            // show vanilla torch visuals again
+            WearableTorchManager.HideVanillaTorchVisuals(player, prefab, false);
+
+            zdo.Set(WearableTorchManager.ZdoKeyBackTorch, false);
+            zdo.Set(WearableTorchManager.ZdoKeyBackTorchPrefab, "");
+
+            WearableTorchesPlugin.Log.LogInfo(
+                "Back torch OFF (ShowHandItems) for " + player.GetPlayerName());
+        }
     }
 }
