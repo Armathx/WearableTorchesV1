@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace WearableTorches
 {
-    [BepInPlugin("com.thomas.wearabletorches", "Wearable Torches", "1.0.0")]
+    [BepInPlugin("com.thomas.wearabletorches", "Wearable Torches", "1.0.4")]
     public class WearableTorchesPlugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -19,7 +19,7 @@ namespace WearableTorches
             Log = Logger;
             _harmony = new Harmony("com.thomas.wearabletorches");
             _harmony.PatchAll();
-            Log.LogInfo("Wearable Torches loaded");
+            Log.LogInfo("Wearable Torches loaded (G key toggle)");
         }
 
         private void Update()
@@ -27,6 +27,14 @@ namespace WearableTorches
             if (ZInput.instance == null)
                 return;
 
+            // Gestion du joueur local : touche G
+            var localPlayer = Player.m_localPlayer;
+            if (localPlayer != null)
+            {
+                WearableTorchManager.HandleLocalInput(localPlayer);
+            }
+
+            // Sync visuelle pour TOUS les joueurs (local + autres)
             var allPlayers = Player.GetAllPlayers();
             foreach (var p in allPlayers)
             {
@@ -52,9 +60,79 @@ namespace WearableTorches
         private static readonly Vector3 LightOffset = new Vector3(0f, 0f, 0.61f);
         private static readonly Quaternion BackRotationOffset = Quaternion.Euler(-80f, 0f, 0f);
 
-        // network sync for all players (called from Update)
+        // Gestion de l'input local (touche G)
+        public static void HandleLocalInput(Player player)
+        {
+            // On ne traite que le joueur owner
+            var nview = GetNView(player);
+            if (nview == null || !nview.IsOwner())
+                return;
+
+            if (!ZInput.GetKeyDown(KeyCode.G))
+                return;
+
+            var zdo = nview.GetZDO();
+            if (zdo == null)
+                return;
+
+            bool hasBackTorch = zdo.GetBool(ZdoKeyBackTorch, false);
+
+            if (!hasBackTorch)
+            {
+                // ON : chercher une torche (en mains de préférence, sinon inventaire)
+                var torchItem = GetTorchInHands(player);
+                if (torchItem == null)
+                    torchItem = FindTorchInInventory(player);
+
+                if (torchItem == null)
+                {
+                    WearableTorchesPlugin.Log.LogInfo(
+                        "Back torch: no torch found to equip on back for " + player.GetPlayerName());
+                    return;
+                }
+
+                var dropPrefab = torchItem.m_dropPrefab;
+                if (dropPrefab == null)
+                {
+                    WearableTorchesPlugin.Log.LogWarning(
+                        "Back torch: torch has no dropPrefab for " + player.GetPlayerName());
+                    return;
+                }
+
+                string prefabName = dropPrefab.name;
+                if (string.IsNullOrEmpty(prefabName))
+                    return;
+
+                zdo.Set(ZdoKeyBackTorchPrefab, prefabName);
+                zdo.Set(ZdoKeyBackTorch, true);
+
+                // On cache les visuels vanilla de torche (main/dos)
+                HideVanillaTorchVisuals(player, true);
+
+                WearableTorchesPlugin.Log.LogInfo(
+                    "Back torch ON (G key) for " + player.GetPlayerName() +
+                    " prefab=" + prefabName);
+            }
+            else
+            {
+                // OFF
+                zdo.Set(ZdoKeyBackTorch, false);
+                zdo.Set(ZdoKeyBackTorchPrefab, "");
+
+                // On restaure les visuels vanilla
+                HideVanillaTorchVisuals(player, false);
+
+                WearableTorchesPlugin.Log.LogInfo(
+                    "Back torch OFF (G key) for " + player.GetPlayerName());
+            }
+        }
+
+        // network sync pour tous les joueurs (appelé dans Update)
         public static void SyncBackTorchForPlayer(Player player)
         {
+            if (player == null)
+                return;
+
             var nview = GetNView(player);
             if (nview == null)
                 return;
@@ -65,24 +143,6 @@ namespace WearableTorches
 
             bool hasBackTorch = zdo.GetBool(ZdoKeyBackTorch, false);
             string prefabName = zdo.GetString(ZdoKeyBackTorchPrefab, "");
-
-            // auto OFF if player equips a torch in hands
-            if (hasBackTorch && nview.IsOwner())
-            {
-                var torchInHands = GetTorchInHands(player);
-                if (torchInHands != null)
-                {
-                    zdo.Set(ZdoKeyBackTorch, false);
-                    zdo.Set(ZdoKeyBackTorchPrefab, "");
-                    hasBackTorch = false;
-
-                    // restore vanilla visuals
-                    HideVanillaTorchVisuals(player, false);
-
-                    WearableTorchesPlugin.Log.LogInfo(
-                        "Back torch auto OFF (torch in hands) for " + player.GetPlayerName());
-                }
-            }
 
             GameObject existing;
             BackTorches.TryGetValue(player, out existing);
@@ -127,10 +187,12 @@ namespace WearableTorches
         internal static bool IsTorch(ItemDrop.ItemData item)
         {
             if (item == null) return false;
-            return (item.m_shared != null ? item.m_shared.m_name : "").ToLower().Contains("torch");
+            return (item.m_shared != null ? item.m_shared.m_name : "")
+                .ToLower()
+                .Contains("torch");
         }
 
-        // torch in hands (right / left)
+        // torche en main (droite / gauche)
         private static ItemDrop.ItemData GetTorchInHands(Player player)
         {
             try
@@ -159,7 +221,25 @@ namespace WearableTorches
             }
         }
 
-        // visual torch on back (no network, no loot)
+        // torche dans l’inventaire (si aucune en main)
+        private static ItemDrop.ItemData FindTorchInInventory(Player player)
+        {
+            var inv = player.GetInventory();
+            if (inv == null) return null;
+
+            var items = inv.GetAllItems();
+            if (items == null) return null;
+
+            foreach (var item in items)
+            {
+                if (IsTorch(item))
+                    return item;
+            }
+
+            return null;
+        }
+
+        // torche visuelle dans le dos (pas de réseau, pas de loot)
         private static GameObject CreateBackTorchVisual(Player player, GameObject prefab)
         {
             if (prefab == null)
@@ -180,14 +260,14 @@ namespace WearableTorches
                 ps.z != 0 ? 1f / ps.z : 1f
             );
 
-            // mesh copy (visual only)
+            // copie mesh (visuel uniquement)
             foreach (var renderer in prefab.GetComponentsInChildren<MeshRenderer>(true))
             {
                 var cloneMesh = UnityEngine.Object.Instantiate(renderer.gameObject, backTorch.transform, false);
                 cloneMesh.name = "BackTorchMesh";
             }
 
-            // flames: player -> prefab
+            // flammes : joueur -> prefab
             GameObject fxPrefab = FindTorchFlamesOnPlayer(player);
             if (fxPrefab == null)
                 fxPrefab = FindTorchFlamesInPrefab(prefab);
@@ -200,7 +280,7 @@ namespace WearableTorches
                 cloneFx.transform.localPosition = FlameOffset;
             }
 
-            // light
+            // lumière
             var lightGO = new GameObject("BackTorchLight");
             lightGO.transform.SetParent(backTorch.transform, false);
             lightGO.transform.localRotation = Quaternion.identity;
@@ -216,7 +296,7 @@ namespace WearableTorches
             return backTorch;
         }
 
-        // hide / show vanilla torch meshes (back/hand) but keep our BackTorchObject
+        // hide / show des meshes vanilla de torche (dos/main) mais on garde BackTorchObject
         internal static void HideVanillaTorchVisuals(Player player, bool hide)
         {
             if (player == null) return;
@@ -287,7 +367,7 @@ namespace WearableTorches
             return player.transform;
         }
 
-        // FX from player hierarchy
+        // FX depuis la hiérarchie du joueur
         private static GameObject FindTorchFlamesOnPlayer(Player player)
         {
             foreach (var t in player.GetComponentsInChildren<Transform>(true))
@@ -309,7 +389,7 @@ namespace WearableTorches
             return null;
         }
 
-        // FX from prefab
+        // FX depuis le prefab
         private static GameObject FindTorchFlamesInPrefab(GameObject prefab)
         {
             if (prefab == null)
@@ -345,99 +425,29 @@ namespace WearableTorches
         {
             DestroyBackTorch();
         }
-    }
-
-    // Patch: HideHandItems -> torch goes to custom back + hide vanilla visuals
-    [HarmonyPatch(typeof(Humanoid), "HideHandItems")]
-    public static class Humanoid_HideHandItems_Patch
-    {
-        static void Postfix(Humanoid __instance, bool onlyRightHand, bool animation, ref bool __result)
+        
+        public static void RemoveBackTorch(Player player)
         {
-            if (!__result)
-                return;
+            if (player == null) return;
 
-            var player = __instance as Player;
-            if (player == null)
-                return;
-
-            var nview = player.GetComponent<ZNetView>();
-            if (nview == null || !nview.IsOwner())
-                return;
-
-            var zdo = nview.GetZDO();
-            if (zdo == null)
-                return;
-
-            var tr = Traverse.Create(player);
-            var hiddenLeft = tr.Field<ItemDrop.ItemData>("m_hiddenLeftItem").Value;
-            var hiddenRight = tr.Field<ItemDrop.ItemData>("m_hiddenRightItem").Value;
-
-            ItemDrop.ItemData torchItem = null;
-
-            if (WearableTorchManager.IsTorch(hiddenRight))
-                torchItem = hiddenRight;
-            else if (WearableTorchManager.IsTorch(hiddenLeft))
-                torchItem = hiddenLeft;
-
-            if (torchItem == null)
+            if (BackTorches.TryGetValue(player, out var go))
             {
-                zdo.Set(WearableTorchManager.ZdoKeyBackTorch, false);
-                zdo.Set(WearableTorchManager.ZdoKeyBackTorchPrefab, "");
-                return;
+                if (go != null)
+                    UnityEngine.Object.Destroy(go);
+                BackTorches.Remove(player);
             }
-
-            var dropPrefab = torchItem.m_dropPrefab;
-            if (dropPrefab == null)
-                return;
-
-            string prefabName = dropPrefab.name;
-            if (string.IsNullOrEmpty(prefabName))
-                return;
-
-            zdo.Set(WearableTorchManager.ZdoKeyBackTorchPrefab, prefabName);
-            zdo.Set(WearableTorchManager.ZdoKeyBackTorch, true);
-
-            // hide vanilla torch meshes
-            WearableTorchManager.HideVanillaTorchVisuals(player, true);
-
-            WearableTorchesPlugin.Log.LogInfo(
-                "Back torch ON (HideHandItems) for " + player.GetPlayerName() +
-                " prefab=" + prefabName);
         }
     }
 
-    // Patch: ShowHandItems -> torch back OFF + restore vanilla visuals
-    [HarmonyPatch]
-    public static class Humanoid_ShowHandItems_Patch
+    [HarmonyPatch(typeof(Player), "OnDestroy")]
+    public static class Player_OnDestroy_Patch
     {
-        static MethodInfo TargetMethod()
+        static void Prefix(Player __instance)
         {
-            return AccessTools.Method(typeof(Humanoid), "ShowHandItems",
-                new Type[] { typeof(bool), typeof(bool) });
-        }
-
-        static void Postfix(Humanoid __instance, bool onlyRightHand, bool animation)
-        {
-            var player = __instance as Player;
-            if (player == null)
-                return;
-
-            var nview = player.GetComponent<ZNetView>();
-            if (nview == null || !nview.IsOwner())
-                return;
-
-            var zdo = nview.GetZDO();
-            if (zdo == null)
-                return;
-
-            zdo.Set(WearableTorchManager.ZdoKeyBackTorch, false);
-            zdo.Set(WearableTorchManager.ZdoKeyBackTorchPrefab, "");
-
-            // re-enable vanilla torch meshes
-            WearableTorchManager.HideVanillaTorchVisuals(player, false);
-
-            WearableTorchesPlugin.Log.LogInfo(
-                "Back torch OFF (ShowHandItems) for " + player.GetPlayerName());
+            WearableTorchManager.RemoveBackTorch(__instance);
         }
     }
+
+    // IMPORTANT : les patches HideHandItems / ShowHandItems ont été SUPPRIMÉS
+    // pour que la torche dans le dos ne soit plus liée à la touche R.
 }
